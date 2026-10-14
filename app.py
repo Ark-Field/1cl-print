@@ -21,7 +21,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 st.set_page_config(page_title="受注一括帳票ジェネレーター (仕入・外注・売上)", layout="wide")
 
 st.title("📑 受注一括帳票ジェネレーター (@pocket API連携版)")
-st.markdown("💡 受注番号を指定して検索し、**「仕入発注書」「外注発注書」「売上納品書」**をワンクリックで一括生成・プレビュー・PDFダウンロードできます。")
+st.markdown("💡 @pocketの詳細画面から連携起動、または受注番号を指定して**「仕入発注書」「外注発注書」「売上納品書」**を一括生成・PDFダウンロードできます。")
 
 # --------------------------------------------------
 # 2. 日本語フォント登録処理
@@ -62,27 +62,32 @@ def setup_japanese_font():
 FONT_NAME = setup_japanese_font()
 
 # --------------------------------------------------
-# 3. サイドバー設定（APIキー・アプリID設定）
+# 3. セキュリティ設定・Secretsからの自動読み込み
 # --------------------------------------------------
-st.sidebar.header("⚙️ 接続・検索設定")
+# SecretsからAPIキーを取得（設定されていない場合は空文字）
+api_key = st.secrets.get("pockets_api_key", st.secrets.get("app36_api_key", ""))
 
-# secrets.tomlからAPIキーを安全に取得
-default_api_key = st.secrets.get("pockets_api_key", st.secrets.get("app36_api_key", ""))
-
-api_key = st.sidebar.text_input("APIキー", value=default_api_key, type="password")
-app_id = st.sidebar.number_input("アプリID", value=51, step=1)
-app_base_host = st.sidebar.text_input("@pocket ホストURL", value="https://app050.at-pocket.com/seihon02_bb")
+# 固定の接続情報（@pocketのベースURL・アプリID）
+APP_BASE_HOST = "https://app050.at-pocket.com/seihon02_bb"
+APP_ID = 51
 
 # URLのクエリパラメータから「受注番号」を取得 (例: ?order_id=260543)
 query_params = st.query_params
 order_id_from_url = query_params.get("order_id", "")
-input_order_id = st.sidebar.text_input("受注番号 (field-1)", value=order_id_from_url)
 
+# --------------------------------------------------
+# 4. サイドバー設定（シンプル化：受注番号のみ）
+# --------------------------------------------------
+st.sidebar.header("⚙️ 検索コントロール")
+input_order_id = st.sidebar.text_input("受注番号 (field-1)", value=order_id_from_url)
 fetch_btn = st.sidebar.button("🔍 @pocketからデータを検索する", type="primary")
+
+# ※もしURLパラメータ（?order_id=...）で直接アクセスされた場合は自動で検索を走らせる
+auto_fetch = bool(order_id_from_url)
 
 
 # --------------------------------------------------
-# 4. フィールド値抽出ヘルパー
+# 5. フィールド値抽出ヘルパー
 # --------------------------------------------------
 def extract_val(raw_val):
     if raw_val is None:
@@ -105,13 +110,12 @@ def extract_val(raw_val):
 
 
 # --------------------------------------------------
-# 5. APIデータ取得関数（受注番号クエリ絞り込み対応）
+# 6. APIデータ取得関数
 # --------------------------------------------------
 def fetch_pocket_record_by_order_no(api_key, base_host, app_id, order_no):
     url = f"{base_host}/api/apps/{app_id}/records"
     headers = {"X-At-Pocket-API-Key": api_key, "Accept": "application/json"}
     
-    # 受注番号 (field-1) でクエリ検索
     params = {
         "query": f'field-1 = "{order_no}"'
     }
@@ -119,21 +123,18 @@ def fetch_pocket_record_by_order_no(api_key, base_host, app_id, order_no):
     try:
         response = requests.get(url, headers=headers, params=params, timeout=15)
         if response.status_code != 200:
-            # クエリ付きで失敗した場合は全取得してPython側でフィルタリングを試みる
             response = requests.get(url, headers=headers, timeout=15)
 
         if response.status_code == 200:
             data = response.json()
             records = data.get("records", data.get("data", []))
             
-            # 受注番号が一致するレコードを抽出
             for r in records:
                 inner = r.get("record", r)
                 curr_order_no = extract_val(inner.get("field-1", ""))
                 if str(curr_order_no) == str(order_no):
                     return inner
             
-            # クエリが効かなかった場合のフォールバック（最初のレコードまたは部分一致）
             if records and not order_no:
                 return records[0].get("record", records[0])
             return None
@@ -146,10 +147,9 @@ def fetch_pocket_record_by_order_no(api_key, base_host, app_id, order_no):
 
 
 # --------------------------------------------------
-# 6. サブテーブル・各明細のパーサー
+# 7. サブテーブルパーサー
 # --------------------------------------------------
 def parse_sub_table_items(record, sub_table_field, field_map):
-    """仕入(field-11)・外注(field-12)・売上(field-10)などのサブテーブルをリスト化する"""
     sub_list = record.get(sub_table_field, "")
     parsed_items = []
     
@@ -174,7 +174,7 @@ def parse_sub_table_items(record, sub_table_field, field_map):
 
 
 # --------------------------------------------------
-# 7. PDF生成関数（仕入・外注・売上 用）
+# 8. PDF生成関数
 # --------------------------------------------------
 def generate_document_pdf(doc_type, header_info, items):
     buffer = io.BytesIO()
@@ -195,40 +195,29 @@ def generate_document_pdf(doc_type, header_info, items):
     elements.append(Paragraph(info_text, sub_style))
     elements.append(Spacer(1, 15))
 
-    # テーブル構造の動的切り替え
     if "発注書" in doc_type:
         headers = ["宛先 / 担当", "納期希望日", "内容明細", "数量"]
         col_widths = [120, 90, 205, 100]
         table_data = [[Paragraph(h, th_style) for h in headers]]
         
         for item in items:
-            vendor = item.get("vendor", "")
-            date_val = item.get("date", "")
-            content = item.get("content", "")
-            qty = item.get("qty", "")
-            
             table_data.append([
-                Paragraph(vendor, td_text),
-                Paragraph(date_val, td_center),
-                Paragraph(content, td_text),
-                Paragraph(qty, td_center),
+                Paragraph(item.get("vendor", ""), td_text),
+                Paragraph(item.get("date", ""), td_center),
+                Paragraph(item.get("content", ""), td_text),
+                Paragraph(item.get("qty", ""), td_center),
             ])
-    else:  # 売上納品書
+    else:
         headers = ["品名", "内容", "数量", "売上単価"]
         col_widths = [180, 155, 85, 95]
         table_data = [[Paragraph(h, th_style) for h in headers]]
         
         for item in items:
-            name = item.get("name", "")
-            content = item.get("content", "")
-            qty = item.get("qty", "")
-            price = item.get("price", "")
-            
             table_data.append([
-                Paragraph(name, td_text),
-                Paragraph(content, td_text),
-                Paragraph(qty, td_center),
-                Paragraph(price, td_center),
+                Paragraph(item.get("name", ""), td_text),
+                Paragraph(item.get("content", ""), td_text),
+                Paragraph(item.get("qty", ""), td_center),
+                Paragraph(item.get("price", ""), td_center),
             ])
 
     t = Table(table_data, colWidths=col_widths, repeatRows=1)
@@ -248,40 +237,37 @@ def generate_document_pdf(doc_type, header_info, items):
 
 
 # --------------------------------------------------
-# 8. メイン画面の処理
+# 9. メイン画面の処理（ボタン押下またはURLパラメータ検知で実行）
 # --------------------------------------------------
-if fetch_btn and input_order_id:
+target_order_id = input_order_id.strip()
+
+if (fetch_btn or auto_fetch) and target_order_id:
     if not api_key:
-        st.error("❌ APIキーが設定されていません。サイドバーを確認してください。")
+        st.error("❌ APIキーが設定されていません。Streamlit Community Cloudの Secrets 設定を確認してください。")
     else:
-        with st.spinner(f"受注番号 [{input_order_id}] のデータを@pocketから取得中..."):
-            record = fetch_pocket_record_by_order_no(api_key, app_base_host, app_id, input_order_id)
+        with st.spinner(f"受注番号 [{target_order_id}] のデータを@pocketから取得中..."):
+            record = fetch_pocket_record_by_order_no(api_key, APP_BASE_HOST, APP_ID, target_order_id)
             
             if not record:
-                st.warning(f"⚠️ 指定された受注番号「{input_order_id}」のデータが見つかりませんでした。")
+                st.warning(f"⚠️ 指定された受注番号「{target_order_id}」のデータが見つかりませんでした。")
             else:
-                # 親データの取得
                 header_info = {
-                    "order_id": extract_val(record.get("field-1", input_order_id)),
+                    "order_id": extract_val(record.get("field-1", target_order_id)),
                     "book_title": extract_val(record.get("field-2", "")),
                     "customer": extract_val(record.get("field-3", ""))
                 }
                 
-                # 1. 売上明細 (field-10)
                 sales_map = {"name": "field-10_3", "content": "field-10_8", "qty": "field-10_4", "price": "field-10_5"}
                 sales_items = parse_sub_table_items(record, "field-10", sales_map)
                 
-                # 2. 外注明細 (field-12)
                 outsource_map = {"vendor": "field-12_1", "date": "field-12_2", "content": "field-12_3", "qty": "field-12_5"}
                 outsource_items = parse_sub_table_items(record, "field-12", outsource_map)
                 
-                # 3. 仕入明細 (field-11)
                 purchase_map = {"vendor": "field-11_1", "date": "field-11_2", "content": "field-11_3", "qty": "field-11_4"}
                 purchase_items = parse_sub_table_items(record, "field-11", purchase_map)
 
                 st.success(f"✅ データ取得成功！ （書名: {header_info['book_title']} / 得意先: {header_info['customer']}）")
 
-                # 3つのタブでプレビュー＆PDFダウンロード
                 tab1, tab2, tab3 = st.tabs(["📦 仕入発注書", "🛠️ 外注発注書", "💰 売上納品書"])
 
                 with tab1:
@@ -289,7 +275,7 @@ if fetch_btn and input_order_id:
                     if purchase_items:
                         st.dataframe(pd.DataFrame(purchase_items), use_container_width=True)
                         pdf_p = generate_document_pdf("仕入発注書", header_info, purchase_items)
-                        st.download_button("📥 仕入発注書PDFをダウンロード", data=pdf_p, file_name=f"仕入発注書_{input_order_id}.pdf", mime="application/pdf", key="dl_purchase")
+                        st.download_button("📥 仕入発注書PDFをダウンロード", data=pdf_p, file_name=f"仕入発注書_{target_order_id}.pdf", mime="application/pdf", key="dl_purchase")
                     else:
                         st.info("仕入明細はありません。")
 
@@ -298,7 +284,7 @@ if fetch_btn and input_order_id:
                     if outsource_items:
                         st.dataframe(pd.DataFrame(outsource_items), use_container_width=True)
                         pdf_o = generate_document_pdf("外注発注書", header_info, outsource_items)
-                        st.download_button("📥 外注発注書PDFをダウンロード", data=pdf_o, file_name=f"外注発注書_{input_order_id}.pdf", mime="application/pdf", key="dl_outsource")
+                        st.download_button("📥 外注発注書PDFをダウンロード", data=pdf_o, file_name=f"外注発注書_{target_order_id}.pdf", mime="application/pdf", key="dl_outsource")
                     else:
                         st.info("外注明細はありません。")
 
@@ -307,9 +293,9 @@ if fetch_btn and input_order_id:
                     if sales_items:
                         st.dataframe(pd.DataFrame(sales_items), use_container_width=True)
                         pdf_s = generate_document_pdf("売上納品書", header_info, sales_items)
-                        st.download_button("📥 売上納品書PDFをダウンロード", data=pdf_s, file_name=f"売上納品書_{input_order_id}.pdf", mime="application/pdf", key="dl_sales")
+                        st.download_button("📥 売上納品書PDFをダウンロード", data=pdf_s, file_name=f"売上納品書_{target_order_id}.pdf", mime="application/pdf", key="dl_sales")
                     else:
                         st.info("売上明細はありません。")
 
 else:
-    st.info("👈 サイドバーに受注番号を入力し、「@pocketからデータを検索する」ボタンを押してください。（あるいは@pocketからのリンクでアクセスしてください）")
+    st.info("👈 @pocketの詳細画面にある「一括帳票を出力」ボタンを押すか、左側に受注番号を入力してください。")
