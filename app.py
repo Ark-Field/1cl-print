@@ -62,27 +62,39 @@ def setup_japanese_font():
 FONT_NAME = setup_japanese_font()
 
 # --------------------------------------------------
-# 3. セキュリティ設定・Secretsからの自動読み込み
+# 3. セキュリティ設定（どのようなキー名でも自動取得する柔軟対応）
 # --------------------------------------------------
-# SecretsからAPIキーを取得（設定されていない場合は空文字）
-api_key = st.secrets.get("pockets_api_key", st.secrets.get("app36_api_key", ""))
+api_key = ""
+try:
+    # 考えられるキー名を順番に探索して最初に見つかったものを採用
+    possible_keys = ["pockets_api_key", "app36_api_key", "ATPOCKET_API_TOKEN", "api_key", "atpocket_api_key"]
+    for k in possible_keys:
+        if k in st.secrets:
+            api_key = st.secrets[k]
+            break
+    
+    # それでも見つからない場合で、Secrets自体に何か値が入っていれば最初のものを取得
+    if not api_key and len(st.secrets.keys()) > 0:
+        first_key = list(st.secrets.keys())[0]
+        api_key = st.secrets[first_key]
+except Exception:
+    pass
 
-# 固定の接続情報（@pocketのベースURL・アプリID）
+# 固定の接続情報
 APP_BASE_HOST = "https://app050.at-pocket.com/seihon02_bb"
 APP_ID = 51
 
-# URLのクエリパラメータから「受注番号」を取得 (例: ?order_id=260543)
+# URLのクエリパラメータから「受注番号」を取得
 query_params = st.query_params
 order_id_from_url = query_params.get("order_id", "")
 
 # --------------------------------------------------
-# 4. サイドバー設定（シンプル化：受注番号のみ）
+# 4. サイドバー設定
 # --------------------------------------------------
 st.sidebar.header("⚙️ 検索コントロール")
 input_order_id = st.sidebar.text_input("受注番号 (field-1)", value=order_id_from_url)
 fetch_btn = st.sidebar.button("🔍 @pocketからデータを検索する", type="primary")
 
-# ※もしURLパラメータ（?order_id=...）で直接アクセスされた場合は自動で検索を走らせる
 auto_fetch = bool(order_id_from_url)
 
 
@@ -237,13 +249,13 @@ def generate_document_pdf(doc_type, header_info, items):
 
 
 # --------------------------------------------------
-# 9. メイン画面の処理（ボタン押下またはURLパラメータ検知で実行）
+# 9. メイン画面の処理
 # --------------------------------------------------
 target_order_id = input_order_id.strip()
 
 if (fetch_btn or auto_fetch) and target_order_id:
     if not api_key:
-        st.error("❌ APIキーが設定されていません。Streamlit Community Cloudの Secrets 設定を確認してください。")
+        st.error("❌ APIキーが設定されていません。Streamlit Community Cloudの Secrets 設定画面でAPIキーが正しく登録されているか確認してください。")
     else:
         with st.spinner(f"受注番号 [{target_order_id}] のデータを@pocketから取得中..."):
             record = fetch_pocket_record_by_order_no(api_key, APP_BASE_HOST, APP_ID, target_order_id)
